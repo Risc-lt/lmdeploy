@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import json
+import os
 import socket
 import subprocess
 from typing import Dict
@@ -13,6 +14,8 @@ from lmdeploy.pytorch.disagg.request import DistServeConnectionRequest, DistServ
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
+
+LMDEPLOY_USE_ASYNC_MIGRATION = os.environ.get('LMDEPLOY_USE_ASYNC_MIGRATION', None)
 
 
 def get_rdma_nics():
@@ -172,8 +175,25 @@ class MooncakeMigrationManagement:
 
         print(f'Connecting to remote engine {self.remote_engine_id} at {self.remote_url}')
 
-    def p2p_migrate(self, assignment: MigrationAssignment, async_op: bool = False):
+    async def p2p_migrate(self, assignment: MigrationAssignment, async_op: bool = False):
         """Migrate data to the remote engine."""
+        if not LMDEPLOY_USE_ASYNC_MIGRATION:
+            # For synchronous migration, call the method directly
+            self._migrate(assignment)
+        else:
+            # For asynchronous migration, use an async method
+            import asyncio
+            loop = asyncio.get_event_loop()
+            future = loop.create_future()
+
+            await loop.run_in_executor(None, self._migrate, assignment)
+
+            result = await future
+            if result != 0:
+                raise RuntimeError(f'Failed to perform async transfer: {result}')
+
+    def _migrate(self, assignment: MigrationAssignment):
+        """Migrate data to the remote engine synchronously."""
         if not self.remote_url:
             raise RuntimeError(f'No connection established to remote engine {self.remote_engine_id}')
 
@@ -229,8 +249,8 @@ class MooncakeBackend(MigrationBackendImpl):
     def p2p_connect(self, connect_request: DistServeConnectionRequest):
         self.links[connect_request.remote_engine_id].connect(connect_request)
 
-    def p2p_migrate(self, assignment: MigrationAssignment, async_op: bool = False):
-        self.links[assignment.remote_engine_id].p2p_migrate(assignment, async_op=async_op)
+    async def p2p_migrate(self, assignment: MigrationAssignment, async_op: bool = False):
+        await self.links[assignment.remote_engine_id].p2p_migrate(assignment, async_op=async_op)
 
     def store(self, assignment: MigrationAssignment, async_op: bool = False):
         raise NotImplementedError
